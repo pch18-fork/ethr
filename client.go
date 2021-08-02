@@ -33,6 +33,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/xtaci/kcp-go/v5"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -173,9 +174,13 @@ func runTest(test *ethrTest) {
 	test.isActive = true
 	if test.testID.Protocol == TCP {
 		if test.testID.Type == Bandwidth {
-			tcpRunBandwidthTest(test, toStop)
+			RunBandwidthTest(TCP, test, toStop)
 		} else if test.testID.Type == Latency {
-			go runTCPLatencyTest(test, gap, toStop)
+			if test.clientParam.BufferSizeRecv > 1 || test.clientParam.BufferSizeSend > 1 {
+				go runLatencyTestEx(TCP, test, gap, toStop)
+			} else {
+				go runLatencyTest(TCP, test, gap, toStop)
+			}
 		} else if test.testID.Type == Cps {
 			go tcpRunCpsTest(test)
 		} else if test.testID.Type == Ping {
@@ -191,6 +196,26 @@ func runTest(test *ethrTest) {
 		if test.testID.Type == Bandwidth ||
 			test.testID.Type == Pps {
 			runUDPBandwidthAndPpsTest(test)
+		}
+	} else if test.testID.Protocol == KCP {
+		if test.testID.Type == Bandwidth {
+			RunBandwidthTest(KCP, test, toStop)
+		} else if test.testID.Type == Latency {
+			if test.clientParam.BufferSizeRecv > 1 || test.clientParam.BufferSizeSend > 1 {
+				go runLatencyTestEx(KCP, test, gap, toStop)
+			} else {
+				go runLatencyTest(KCP, test, gap, toStop)
+			}
+		}
+	} else if test.testID.Protocol == QUIC {
+		if test.testID.Type == Bandwidth {
+			RunBandwidthTest(QUIC, test, toStop)
+		} else if test.testID.Type == Latency {
+			if test.clientParam.BufferSizeRecv > 1 || test.clientParam.BufferSizeSend > 1 {
+				go runLatencyTestEx(QUIC, test, gap, toStop)
+			} else {
+				go runLatencyTest(QUIC, test, gap, toStop)
+			}
 		}
 	} else if test.testID.Protocol == ICMP {
 		VerifyPermissionForTest(test.testID)
@@ -223,18 +248,18 @@ func runTest(test *ethrTest) {
 	return
 }
 
-func tcpRunBandwidthTest(test *ethrTest, toStop chan int) {
+func RunBandwidthTest(p EthrProtocol, test *ethrTest, toStop chan int) {
 	var wg sync.WaitGroup
-	tcpRunBanwidthTestThreads(test, &wg)
+	RunBanwidthTestThreads(p, test, &wg)
 	go func(wg *sync.WaitGroup) {
 		wg.Wait()
 		toStop <- disconnect
 	}(&wg)
 }
 
-func tcpRunBanwidthTestThreads(test *ethrTest, wg *sync.WaitGroup) {
+func RunBanwidthTestThreads(p EthrProtocol, test *ethrTest, wg *sync.WaitGroup) {
 	for th := uint32(0); th < test.clientParam.NumThreads; th++ {
-		conn, err := ethrDialInc(TCP, test.dialAddr, uint16(th))
+		conn, err := ethrDialInc(p, test.dialAddr, uint16(th))
 		if err != nil {
 			ui.printErr("Error dialing connection: %v", err)
 			continue
@@ -246,11 +271,11 @@ func tcpRunBanwidthTestThreads(test *ethrTest, wg *sync.WaitGroup) {
 			continue
 		}
 		wg.Add(1)
-		go runTCPBandwidthTestHandler(test, conn, wg)
+		go runBandwidthTestHandler(test, conn, wg)
 	}
 }
 
-func runTCPBandwidthTestHandler(test *ethrTest, conn net.Conn, wg *sync.WaitGroup) {
+func runBandwidthTestHandler(test *ethrTest, conn net.Conn, wg *sync.WaitGroup) {
 	defer wg.Done()
 	defer conn.Close()
 	ec := test.newConn(conn)
@@ -294,9 +319,9 @@ ExitForLoop:
 	}
 }
 
-func runTCPLatencyTest(test *ethrTest, g time.Duration, toStop chan int) {
-	ui.printMsg("Running latency test: %v, %v", test.clientParam.RttCount, test.clientParam.BufferSize)
-	conn, err := ethrDial(TCP, test.dialAddr)
+func runLatencyTestEx(p EthrProtocol, test *ethrTest, g time.Duration, toStop chan int) {
+	ui.printDbg("runLatencyTestEx")
+	conn, err := ethrDial(p, test.dialAddr)
 	if err != nil {
 		ui.printErr("Error dialing the latency connection: %v", err)
 		return
@@ -307,7 +332,96 @@ func runTCPLatencyTest(test *ethrTest, g time.Duration, toStop chan int) {
 		ui.printErr("Failed in handshake with the server. Error: %v", err)
 		return
 	}
-	ui.emitLatencyHdr()
+	ui.emitLatencyHdrEx()
+
+	bufferSizeSend := test.clientParam.BufferSizeSend
+	bufferSend := make([]byte, bufferSizeSend)
+	for i := uint32(0); i < bufferSizeSend; i++ {
+		bufferSend[i] = byte(i)
+	}
+	blenSend := len(bufferSend)
+
+	bufferSizeRecv := test.clientParam.BufferSizeRecv
+	bufferRecv := make([]byte, bufferSizeRecv)
+
+	rttCount := test.clientParam.RttCount
+	latencyNumbers := make([]time.Duration, rttCount)
+
+	if p == KCP {
+		go func() {
+			for {
+				if conn == nil {
+					return
+				}
+				conv := conn.(*kcp.UDPSession).GetConv()
+				rto := conn.(*kcp.UDPSession).GetRTO()
+				srtt := conn.(*kcp.UDPSession).GetSRTT()
+				srttvar := conn.(*kcp.UDPSession).GetSRTTVar()
+				//https://datatracker.ietf.org/doc/html/rfc6298
+				//https://www.cnblogs.com/ys-ys/p/10265254.htmlhttps://zhuanlan.zhihu.com/p/53849089
+				//https://www.cnblogs.com/ys-ys/p/10265254.html
+				ui.printDbg("conv=%v rto=%v srtt=%v srttvar=%v", conv, rto, srtt, srttvar)
+				time.Sleep(time.Second)
+			}
+		}()
+	}
+ExitForLoop:
+	for {
+	ExitSelect:
+		select {
+		case <-test.done:
+			break ExitForLoop
+		default:
+			t0 := time.Now()
+			for i := uint32(0); i < rttCount; i++ {
+				s1 := time.Now()
+				n, err := conn.Write(bufferSend)
+				if err != nil || n < blenSend {
+					ui.printDbg("Error sending data on a connection for latency test: %v success times:%d", err, i)
+					toStop <- disconnect
+					break ExitSelect
+				}
+				_, err = io.ReadFull(conn, bufferRecv)
+				if err != nil {
+					ui.printDbg("Error receiving data on a connection for latency test: %v, success times:%d", err, i)
+					toStop <- disconnect
+					break ExitSelect
+				}
+				e2 := time.Since(s1)
+				latencyNumbers[i] = e2
+				ui.printDbg("success latency test loop: %v latency: %v", i+1, e2)
+			}
+			// TODO temp code, fix it better, this is to allow server to do
+			// server side latency measurements as well.
+			_, _ = conn.Write(bufferSend)
+			calcAndPrintLatency(test, rttCount, latencyNumbers)
+			printKCPStat()
+
+			// only test rtt times
+			conn.Close()
+			os.Exit(0)
+			t1 := time.Since(t0)
+			if t1 < g {
+				time.Sleep(g - t1)
+			}
+		}
+	}
+}
+
+func runLatencyTest(p EthrProtocol, test *ethrTest, g time.Duration, toStop chan int) {
+	ui.printMsg("Running latency test: %v, %v", test.clientParam.RttCount, test.clientParam.BufferSize)
+	conn, err := ethrDial(p, test.dialAddr)
+	if err != nil {
+		ui.printErr("Error dialing the latency connection: %v", err)
+		return
+	}
+	defer conn.Close()
+	err = handshakeWithServer(test, conn)
+	if err != nil {
+		ui.printErr("Failed in handshake with the server. Error: %v", err)
+		return
+	}
+	ui.emitLatencyHdrEx()
 	buffSize := test.clientParam.BufferSize
 	buff := make([]byte, buffSize)
 	for i := uint32(0); i < buffSize; i++ {
@@ -328,13 +442,13 @@ ExitForLoop:
 				s1 := time.Now()
 				n, err := conn.Write(buff)
 				if err != nil || n < blen {
-					ui.printDbg("Error sending/receiving data on a connection for latency test: %v", err)
+					ui.printDbg("Error sending data on a connection for latency test: %v", err)
 					toStop <- disconnect
 					break ExitSelect
 				}
 				_, err = io.ReadFull(conn, buff)
 				if err != nil {
-					ui.printDbg("Error sending/receiving data on a connection for latency test: %v", err)
+					ui.printDbg("Error receiving data on a connection for latency test: %v", err)
 					toStop <- disconnect
 					break ExitSelect
 				}
@@ -374,16 +488,23 @@ func calcAndPrintLatency(test *ethrTest, rttCount uint32, latencyNumbers []time.
 	avg := elapsed
 	min := latencyNumbers[0]
 	max := latencyNumbers[rttCount-1]
+	p10 := latencyNumbers[((rttCountFixed*10)/100)-1]
+	p20 := latencyNumbers[((rttCountFixed*20)/100)-1]
+	p30 := latencyNumbers[((rttCountFixed*30)/100)-1]
+	p40 := latencyNumbers[((rttCountFixed*40)/100)-1]
 	p50 := latencyNumbers[((rttCountFixed*50)/100)-1]
+	p60 := latencyNumbers[((rttCountFixed*60)/100)-1]
+	p70 := latencyNumbers[((rttCountFixed*70)/100)-1]
+	p80 := latencyNumbers[((rttCountFixed*80)/100)-1]
 	p90 := latencyNumbers[((rttCountFixed*90)/100)-1]
 	p95 := latencyNumbers[((rttCountFixed*95)/100)-1]
 	p99 := latencyNumbers[((rttCountFixed*99)/100)-1]
 	p999 := latencyNumbers[uint64(((float64(rttCountFixed)*99.9)/100)-1)]
 	p9999 := latencyNumbers[uint64(((float64(rttCountFixed)*99.99)/100)-1)]
-	ui.emitLatencyResults(
+	ui.emitLatencyResultsEx(
 		test.session.remoteIP,
 		protoToString(test.testID.Protocol),
-		avg, min, max, p50, p90, p95, p99, p999, p9999)
+		avg, min, max, p10, p20, p30, p40, p50, p60, p70, p80, p90, p95, p99, p999, p9999)
 }
 
 func tcpRunCpsTest(test *ethrTest) {

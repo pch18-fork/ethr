@@ -154,5 +154,7 @@ func emitTestResults(s uint64) {
 		ui.emitTestResult(v, TCP, s)
 		ui.emitTestResult(v, UDP, s)
 		ui.emitTestResult(v, ICMP, s)
+		ui.emitTestResult(v, KCP, s)
+		ui.emitTestResult(v, QUIC, s)
 	}
 }

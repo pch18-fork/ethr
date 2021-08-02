@@ -30,6 +30,8 @@ func initServerUI(showUI bool) {
 	gAggregateTestResults[TCP] = &ethrTestResultAggregate{}
 	gAggregateTestResults[UDP] = &ethrTestResultAggregate{}
 	gAggregateTestResults[ICMP] = &ethrTestResultAggregate{}
+	gAggregateTestResults[KCP] = &ethrTestResultAggregate{}
+	gAggregateTestResults[QUIC] = &ethrTestResultAggregate{}
 	if !showUI || !initServerTui() {
 		initServerCli()
 	}
@@ -207,8 +209,15 @@ func (u *serverTui) emitTestHdr() {
 func (u *serverTui) emitLatencyHdr() {
 }
 
+func (u *serverTui) emitLatencyHdrEx() {
+}
+
 func (u *serverTui) emitLatencyResults(remote, proto string, avg, min, max, p50, p90, p95, p99, p999, p9999 time.Duration) {
 	logLatency(remote, proto, avg, min, max, p50, p90, p95, p99, p999, p9999)
+}
+
+func (u *serverTui) emitLatencyResultsEx(remote, proto string, avg, min, max, p10, p20, p30, p40, p50, p60, p70, p80, p90, p95, p99, p999, p9999 time.Duration) {
+	logLatencyEx(remote, proto, avg, min, max, p10, p20, p30, p40, p50, p60, p70, p80, p90, p95, p99, p999, p9999)
 }
 
 func (u *serverTui) paint(seconds uint64) {
@@ -353,7 +362,7 @@ func (u *serverCli) emitTestResultEnd() {
 }
 
 func (u *serverCli) emitTestHdr() {
-	s := []string{"RemoteAddress", "Proto", "Bits/s", "Conn/s", "Pkt/s", "Latency"}
+	s := []string{"RemoteAddress", "Proto", "Bits/s", "Conn/s", "Pkts/s", "Latency"}
 	fmt.Println("-----------------------------------------------------------")
 	fmt.Printf("[%13s]  %5s  %7s  %7s  %7s  %8s\n", s[0], s[1], s[2], s[3], s[4], s[5])
 }
@@ -361,8 +370,15 @@ func (u *serverCli) emitTestHdr() {
 func (u *serverCli) emitLatencyHdr() {
 }
 
+func (u *serverCli) emitLatencyHdrEx() {
+}
+
 func (u *serverCli) emitLatencyResults(remote, proto string, avg, min, max, p50, p90, p95, p99, p999, p9999 time.Duration) {
 	logLatency(remote, proto, avg, min, max, p50, p90, p95, p99, p999, p9999)
+}
+
+func (u *serverCli) emitLatencyResultsEx(remote, proto string, avg, min, max, p10, p20, p30, p40, p50, p60, p70, p80, p90, p95, p99, p999, p9999 time.Duration) {
+	logLatencyEx(remote, proto, avg, min, max, p10, p20, p30, p40, p50, p60, p70, p80, p90, p95, p99, p999, p9999)
 }
 
 func (u *serverCli) emitStats(netStats ethrNetStat) {
@@ -375,7 +391,7 @@ func (u *serverCli) printTestResults(s []string) {
 }
 
 func emitAggregateResults() {
-	var protoList = []EthrProtocol{TCP, UDP, ICMP}
+	var protoList = []EthrProtocol{TCP, UDP, ICMP, KCP, QUIC}
 	for _, proto := range protoList {
 		emitAggregate(proto)
 	}
@@ -414,7 +430,7 @@ func getTestResults(s *ethrSession, proto EthrProtocol, seconds uint64) []string
 		aggTestResult.bw += bw
 		aggTestResult.cbw++
 
-		if proto == TCP {
+		if proto == TCP || proto == KCP || proto == QUIC {
 			cpsTestOn = true
 			cps = atomic.SwapUint64(&test.testResult.cps, 0)
 			cps /= seconds
@@ -430,7 +446,7 @@ func getTestResults(s *ethrSession, proto EthrProtocol, seconds uint64) []string
 			aggTestResult.cpps++
 		}
 
-		if proto == TCP {
+		if proto == TCP || proto == KCP || proto == QUIC {
 			latency = atomic.LoadUint64(&test.testResult.latency)
 			if latency > 0 {
 				latTestOn = true

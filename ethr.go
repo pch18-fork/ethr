@@ -9,6 +9,8 @@ import (
 	"flag"
 	"fmt"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"runtime"
 	"strings"
@@ -28,6 +30,7 @@ func main() {
 	//
 	// If version is not set via ldflags, then default to UNKNOWN
 	//
+	go http.ListenAndServe("0.0.0.0:6060", nil)
 	if gVersion == "" {
 		gVersion = "UNKNOWN"
 	}
@@ -59,6 +62,8 @@ func main() {
 	// Client & External Client
 	clientDest := flag.String("c", "", "")
 	bufLenStr := flag.String("l", "", "")
+	bufLenStrSend := flag.String("ls", "", "")
+	bufLenStrRecv := flag.String("lr", "", "")
 	bwRateStr := flag.String("b", "", "")
 	cport := flag.Int("cport", 0, "")
 	duration := flag.Duration("d", 10*time.Second, "")
@@ -86,6 +91,12 @@ func main() {
 		if *bufLenStr != "" {
 			printServerModeArgError("l")
 		}
+		if *bufLenStrSend != "" {
+			printServerModeArgError("ls")
+		}
+		if *bufLenStrRecv != "" {
+			printServerModeArgError("lr")
+		}
 		if *bwRateStr != "" {
 			printServerModeArgError("b")
 		}
@@ -104,9 +115,9 @@ func main() {
 		if *ncs {
 			printServerModeArgError("ncs")
 		}
-		if *protocol != "tcp" {
-			printServerModeArgError("p")
-		}
+		// if *protocol != "tcp" {
+		// printServerModeArgError("p")
+		// }
 		if *reverse {
 			printServerModeArgError("r")
 		}
@@ -177,8 +188,7 @@ func main() {
 	var destination string
 	if *isServer {
 		// Server side parameter processing.
-		testType = All
-		serverParam := ethrServerParam{*showUI}
+		serverParam := ethrServerParam{*showUI, getProtocol(*protocol)}
 		runServer(serverParam)
 	} else {
 		gIsExternalClient = false
@@ -198,6 +208,26 @@ func main() {
 		}
 		bufLen := unitToNumber(*bufLenStr)
 		if bufLen == 0 {
+			printUsageError(fmt.Sprintf("Invalid length specified: %s" + *bufLenStr))
+		}
+
+		// Default latency test to 1B if length is not specified
+		switch *bufLenStrSend {
+		case "":
+			*bufLenStrSend = getDefaultBufferLenStr(*testTypePtr)
+		}
+		bufLenSend := unitToNumber(*bufLenStrSend)
+		if bufLenSend == 0 {
+			printUsageError(fmt.Sprintf("Invalid length specified: %s" + *bufLenStrSend))
+		}
+
+		// Default latency test to 1B if length is not specified
+		switch *bufLenStrRecv {
+		case "":
+			*bufLenStrRecv = getDefaultBufferLenStr(*testTypePtr)
+		}
+		bufLenRecv := unitToNumber(*bufLenStrRecv)
+		if bufLenRecv == 0 {
 			printUsageError(fmt.Sprintf("Invalid length specified: %s" + *bufLenStr))
 		}
 
@@ -231,6 +261,8 @@ func main() {
 		clientParam := EthrClientParam{
 			uint32(*thCount),
 			uint32(bufLen),
+			uint32(bufLenSend),
+			uint32(bufLenRecv),
 			uint32(*iterCount),
 			*reverse,
 			*duration,
@@ -255,6 +287,10 @@ func getProtocol(protoStr string) (proto EthrProtocol) {
 		proto = UDP
 	case "ICMP":
 		proto = ICMP
+	case "KCP":
+		proto = KCP
+	case "QUIC":
+		proto = QUIC
 	default:
 		printUsageError(fmt.Sprintf("Invalid value \"%s\" specified for parameter \"-p\".\n"+
 			"Valid parameters and values are:\n", protoStr))
@@ -310,7 +346,7 @@ func validateClientTest(testID EthrTestID, clientParam EthrClientParam) {
 	testType := testID.Type
 	protocol := testID.Protocol
 	switch protocol {
-	case TCP:
+	case TCP, KCP, QUIC:
 		if testType != Bandwidth && testType != Cps && testType != Latency && testType != Ping && testType != TraceRoute && testType != MyTraceRoute {
 			emitUnsupportedTest(testID)
 		}
@@ -318,7 +354,7 @@ func validateClientTest(testID EthrTestID, clientParam EthrClientParam) {
 			printReverseModeError()
 		}
 		if clientParam.BufferSize > 2*GIGA {
-			printUsageError("Maximum allowed value for \"-l\" for TCP is 2GB.")
+			printUsageError(fmt.Sprintf("Maximum allowed value for \"-l\" for %v is 2GB.", protocol))
 		}
 	case UDP:
 		if testType != Bandwidth && testType != Pps {
@@ -344,7 +380,7 @@ func validateExtModeClientTest(testID EthrTestID) {
 	testType := testID.Type
 	protocol := testID.Protocol
 	switch protocol {
-	case TCP:
+	case TCP, KCP, QUIC:
 		if testType != Ping && testType != Cps && testType != TraceRoute && testType != MyTraceRoute {
 			emitUnsupportedTest(testID)
 		}
@@ -367,7 +403,7 @@ func emitUnsupportedTest(testID EthrTestID) {
 }
 
 func printReverseModeError() {
-	printUsageError("Reverse mode (-r) is only supported for TCP Bandwidth tests.")
+	printUsageError("Reverse mode (-r) is only supported for  Bandwidth tests.")
 }
 
 func printUsageError(s string) {
@@ -462,7 +498,7 @@ func printExtClientUsage() {
 }
 
 func printPortUsage() {
-	printFlagUsage("port", "<number>", "Use specified port number for TCP & UDP tests.",
+	printFlagUsage("port", "<number>", "Use specified port number for tests.",
 		"Default: 8888")
 }
 
@@ -517,13 +553,13 @@ func printBufLenUsage() {
 
 func printProtocolUsage() {
 	printFlagUsage("p", "<protocol>",
-		"Protocol (\"tcp\", \"udp\", \"http\", \"https\", or \"icmp\")",
+		"Protocol (\"tcp\", \"udp\", \"http\", \"https\", \"kcp\", \"quic\", or \"icmp\")",
 		"Default: tcp")
 }
 
 func printExtProtocolUsage() {
 	printFlagUsage("p", "<protocol>",
-		"Protocol (\"tcp\", or \"icmp\")",
+		"Protocol (\"tcp\", \"kcp\", \"quic\", or \"icmp\")",
 		"Default: tcp")
 }
 
@@ -565,12 +601,12 @@ func printBwRateUsage() {
 }
 
 func printCPortUsage() {
-	printFlagUsage("cport", "<number>", "Use specified local port number in client for TCP & UDP tests.",
+	printFlagUsage("cport", "<number>", "Use specified local port number in client for tests.",
 		"Default: 0 - Ephemeral Port")
 }
 
 func printIPUsage() {
-	printFlagUsage("ip", "<string>", "Bind to specified local IP address for TCP & UDP tests.",
+	printFlagUsage("ip", "<string>", "Bind to specified local IP address for tests.",
 		"This must be a valid IPv4 or IPv6 address.",
 		"Default: <empty> - Any IP")
 }

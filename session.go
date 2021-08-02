@@ -37,6 +37,8 @@ const (
 	TCP EthrProtocol = iota
 	UDP
 	ICMP
+	KCP
+	QUIC
 )
 
 const (
@@ -108,19 +110,22 @@ const (
 )
 
 type EthrClientParam struct {
-	NumThreads  uint32
-	BufferSize  uint32
-	RttCount    uint32
-	Reverse     bool
-	Duration    time.Duration
-	Gap         time.Duration
-	WarmupCount uint32
-	BwRate      uint64
-	ToS         uint8
+	NumThreads     uint32
+	BufferSize     uint32
+	BufferSizeSend uint32
+	BufferSizeRecv uint32
+	RttCount       uint32
+	Reverse        bool
+	Duration       time.Duration
+	Gap            time.Duration
+	WarmupCount    uint32
+	BwRate         uint64
+	ToS            uint8
 }
 
 type ethrServerParam struct {
-	showUI bool
+	showUI   bool
+	protocol EthrProtocol
 }
 
 var gIPVersion ethrIPVer = ethrIPAny

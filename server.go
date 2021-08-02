@@ -6,14 +6,27 @@
 package main
 
 import (
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha1"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"os"
 	"runtime"
 	"sort"
 	"sync/atomic"
 	"time"
+
+	quic "github.com/lucas-clemente/quic-go"
+	kcp "github.com/xtaci/kcp-go/v5"
+	"github.com/xtaci/tcpraw"
+	"golang.org/x/crypto/pbkdf2"
 )
 
 var gCert []byte
@@ -43,8 +56,16 @@ func runServer(serverParam ethrServerParam) {
 	startStatsTimer()
 	fmt.Println("-----------------------------------------------------------")
 	showAcceptedIPVersion()
-	ui.printMsg("Listening on port %d for TCP & UDP", gEthrPort)
-	srvrRunUDPServer()
+	if serverParam.protocol == KCP {
+		ui.printMsg("Listening on port %d for TCP & KCP", gEthrPort)
+		srvrRunKCPServer()
+	} else if serverParam.protocol == QUIC {
+		ui.printMsg("Listening on port %d for QUIC", gEthrPort)
+		srvrRunQUICServer()
+	} else {
+		ui.printMsg("Listening on port %d for TCP & UDP", gEthrPort)
+		srvrRunUDPServer()
+	}
 	err := srvrRunTCPServer()
 	if err != nil {
 		finiServer()
@@ -79,11 +100,20 @@ func srvrRunTCPServer() error {
 			ui.printErr("Error accepting new TCP connection: %v", err)
 			continue
 		}
-		go srvrHandleNewTcpConn(conn)
+		err = conn.(*net.TCPConn).SetWriteBuffer(1024 * 1024 * 4)
+		if err != nil {
+			ui.printErr("Error tcp SetWriteBuffer: %v", err)
+		}
+
+		err = conn.(*net.TCPConn).SetReadBuffer(1024 * 1024 * 4)
+		if err != nil {
+			ui.printErr("Error tcp SetReadBuffer: %v", err)
+		}
+		go srvrHandleNewConn(conn, TCP)
 	}
 }
 
-func srvrHandleNewTcpConn(conn net.Conn) {
+func srvrHandleNewConn(conn net.Conn, protocol EthrProtocol) {
 	defer conn.Close()
 
 	server, port, err := net.SplitHostPort(conn.RemoteAddr().String())
@@ -100,7 +130,7 @@ func srvrHandleNewTcpConn(conn net.Conn) {
 	ethrUnused(lserver, lport)
 	ui.printDbg("New connection from %v, port %v to %v, port %v", server, port, lserver, lport)
 
-	test, isNew := createOrGetTest(server, TCP, All)
+	test, isNew := createOrGetTest(server, protocol, All)
 	if test == nil {
 		return
 	}
@@ -133,17 +163,19 @@ func srvrHandleNewTcpConn(conn net.Conn) {
 		return
 	}
 	isCPSorPing = false
-	if testID.Protocol == TCP {
-		if testID.Type == Bandwidth {
-			srvrRunTCPBandwidthTest(test, clientParam, conn)
-		} else if testID.Type == Latency {
-			ui.emitLatencyHdr()
-			srvrRunTCPLatencyTest(test, clientParam, conn)
+	if testID.Type == Bandwidth {
+		srvrRunBandwidthTest(test, clientParam, conn)
+	} else if testID.Type == Latency {
+		ui.emitLatencyHdr()
+		if clientParam.BufferSizeSend > 1 || clientParam.BufferSizeRecv > 1 {
+			srvrRunLatencyTestEx(test, clientParam, conn)
+		} else {
+			srvrRunLatencyTest(test, clientParam, conn)
 		}
 	}
 }
 
-func srvrRunTCPBandwidthTest(test *ethrTest, clientParam EthrClientParam, conn net.Conn) {
+func srvrRunBandwidthTest(test *ethrTest, clientParam EthrClientParam, conn net.Conn) {
 	size := clientParam.BufferSize
 	buff := make([]byte, size)
 	for i := uint32(0); i < size; i++ {
@@ -165,7 +197,7 @@ func srvrRunTCPBandwidthTest(test *ethrTest, clientParam EthrClientParam, conn n
 			ui.printDbg("Error sending/receiving data on a connection for bandwidth test: %v", err)
 			break
 		}
-		atomic.AddUint64(&test.testResult.bw, uint64(size))
+		atomic.AddUint64(&test.testResult.bw, uint64(n))
 		if clientParam.Reverse {
 			sentBytes += uint64(n)
 			start, waitTime, sentBytes, bytesToSend = enforceThrottle(start, waitTime, totalBytesToSend, sentBytes, bufferLen)
@@ -173,7 +205,71 @@ func srvrRunTCPBandwidthTest(test *ethrTest, clientParam EthrClientParam, conn n
 	}
 }
 
-func srvrRunTCPLatencyTest(test *ethrTest, clientParam EthrClientParam, conn net.Conn) {
+func srvrRunLatencyTestEx(test *ethrTest, clientParam EthrClientParam, conn net.Conn) {
+	clientBytesRecv := make([]byte, int(clientParam.BufferSizeRecv))
+	clientBytesSend := make([]byte, int(clientParam.BufferSizeSend))
+	for i := uint32(0); i < clientParam.BufferSizeRecv; i++ {
+		clientBytesRecv[i] = byte(i)
+	}
+	rttCount := clientParam.RttCount
+	latencyNumbers := make([]time.Duration, rttCount)
+	for {
+		_, err := io.ReadFull(conn, clientBytesSend)
+		if err != nil {
+			ui.printDbg("Error receiving data for latency test: %v", err)
+			return
+		}
+		for i := uint32(0); i < rttCount; i++ {
+			s1 := time.Now()
+			_, err = conn.Write(clientBytesRecv)
+			if err != nil {
+				ui.printDbg("Error sending data for latency test: %v", err)
+				return
+			}
+			_, err = io.ReadFull(conn, clientBytesSend)
+			conn.SetDeadline(time.Now().Add(time.Second * 600))
+			if err != nil {
+				ui.printDbg("Error receiving data for latency test: %v", err)
+				return
+			}
+			e2 := time.Since(s1)
+			latencyNumbers[i] = e2
+		}
+		sum := int64(0)
+		for _, d := range latencyNumbers {
+			sum += d.Nanoseconds()
+		}
+		elapsed := time.Duration(sum / int64(rttCount))
+		sort.SliceStable(latencyNumbers, func(i, j int) bool {
+			return latencyNumbers[i] < latencyNumbers[j]
+		})
+		//
+		// Special handling for rttCount == 1. This prevents negative index
+		// in the latencyNumber index. The other option is to use
+		// roundUpToZero() but that is more expensive.
+		//
+		rttCountFixed := rttCount
+		if rttCountFixed == 1 {
+			rttCountFixed = 2
+		}
+		atomic.SwapUint64(&test.testResult.latency, uint64(elapsed.Nanoseconds()))
+		avg := elapsed
+		min := latencyNumbers[0]
+		max := latencyNumbers[rttCount-1]
+		p50 := latencyNumbers[((rttCountFixed*50)/100)-1]
+		p90 := latencyNumbers[((rttCountFixed*90)/100)-1]
+		p95 := latencyNumbers[((rttCountFixed*95)/100)-1]
+		p99 := latencyNumbers[((rttCountFixed*99)/100)-1]
+		p999 := latencyNumbers[uint64(((float64(rttCountFixed)*99.9)/100)-1)]
+		p9999 := latencyNumbers[uint64(((float64(rttCountFixed)*99.99)/100)-1)]
+		ui.emitLatencyResults(
+			test.session.remoteIP,
+			protoToString(test.testID.Protocol),
+			avg, min, max, p50, p90, p95, p99, p999, p9999)
+	}
+}
+
+func srvrRunLatencyTest(test *ethrTest, clientParam EthrClientParam, conn net.Conn) {
 	bytes := make([]byte, clientParam.BufferSize)
 	rttCount := clientParam.RttCount
 	latencyNumbers := make([]time.Duration, rttCount)
@@ -191,6 +287,7 @@ func srvrRunTCPLatencyTest(test *ethrTest, clientParam EthrClientParam, conn net
 				return
 			}
 			_, err = io.ReadFull(conn, bytes)
+			conn.SetDeadline(time.Now().Add(time.Second * 600))
 			if err != nil {
 				ui.printDbg("Error receiving data for latency test: %v", err)
 				return
@@ -261,6 +358,88 @@ func srvrRunUDPServer() error {
 	return nil
 }
 
+func srvrRunKCPServer() error {
+	config := KCPConfig{}
+	err := parseKCPJSONConfig(&config, "kcp.json")
+	if err != nil {
+		ui.printErr("parse kcp config error:", err)
+	}
+	switch config.Mode {
+	case "normal":
+		config.NoDelay, config.Interval, config.Resend, config.NoCongestion = 0, 40, 2, 1
+	case "fast":
+		config.NoDelay, config.Interval, config.Resend, config.NoCongestion = 0, 30, 2, 1
+	case "fast2":
+		config.NoDelay, config.Interval, config.Resend, config.NoCongestion = 1, 20, 2, 1
+	case "fast3":
+		config.NoDelay, config.Interval, config.Resend, config.NoCongestion = 1, 10, 2, 1
+	}
+
+	ui.printDbg("key:%v", config.Key)
+	ui.printDbg("encryption:%v", config.Crypt)
+	ui.printDbg("mode:%v", config.Mode)
+	ui.printDbg("mtu:%v", config.MTU)
+	ui.printDbg("sndwnd:%v rcvwnd:%v", config.SndWnd, config.RcvWnd)
+	ui.printDbg("datashard:%v parityshard:%v", config.DataShard, config.ParityShard)
+	ui.printDbg("dscp:%v", config.DSCP)
+	ui.printDbg("acknodelay:%v", config.AckNodelay)
+	ui.printDbg("nodelay:%v interval:%v resend:%v nc:%v", config.NoDelay, config.Interval, config.Resend, config.NoCongestion)
+	ui.printDbg("sockbuf:%v", config.SockBuf)
+	ui.printDbg("tcp:%v", config.TCP)
+	ui.printDbg("streammode:%v", config.StreamMode)
+
+	pass := pbkdf2.Key([]byte(config.Key), []byte("kcp-go"), 4096, 32, sha1.New)
+	var block kcp.BlockCrypt
+	switch config.Crypt {
+	case "sm4":
+		block, _ = kcp.NewSM4BlockCrypt(pass[:16])
+	case "tea":
+		block, _ = kcp.NewTEABlockCrypt(pass[:16])
+	case "xor":
+		block, _ = kcp.NewSimpleXORBlockCrypt(pass)
+	case "none":
+		block, _ = kcp.NewNoneBlockCrypt(pass)
+	case "aes-128":
+		block, _ = kcp.NewAESBlockCrypt(pass[:16])
+	case "aes-192":
+		block, _ = kcp.NewAESBlockCrypt(pass[:24])
+	case "blowfish":
+		block, _ = kcp.NewBlowfishBlockCrypt(pass)
+	case "twofish":
+		block, _ = kcp.NewTwofishBlockCrypt(pass)
+	case "cast5":
+		block, _ = kcp.NewCast5BlockCrypt(pass[:16])
+	case "3des":
+		block, _ = kcp.NewTripleDESBlockCrypt(pass[:24])
+	case "xtea":
+		block, _ = kcp.NewXTEABlockCrypt(pass[:16])
+	case "salsa20":
+		block, _ = kcp.NewSalsa20BlockCrypt(pass)
+	case "aes":
+		block, _ = kcp.NewAESBlockCrypt(pass)
+	default:
+	}
+
+	if config.TCP { // tcp dual stack
+		conn, err := tcpraw.Listen("tcp", gLocalIP+":"+gEthrPortStr)
+		if err != nil {
+			ui.printErr("tcpraw.Listen: %v", err)
+		}
+		lis, err := kcp.ServeConn(block, config.DataShard, config.ParityShard, conn)
+		if err != nil {
+			ui.printErr("kcp.ServeConn: %v", err)
+		}
+		go srvrRunKCPPacketHandler(lis, config)
+	}
+
+	lis, err := kcp.ListenWithOptions(gLocalIP+":"+gEthrPortStr, block, config.DataShard, config.ParityShard)
+	if err != nil {
+		ui.printErr("kcp.ListenWithOptions: %v", err)
+	}
+	go srvrRunKCPPacketHandler(lis, config)
+	return nil
+}
+
 func srvrRunUDPPacketHandler(conn *net.UDPConn) {
 	// This local map aids in efficiency to look up a test based on client's IP
 	// address. We could use createOrGetTest but that takes a global lock.
@@ -304,7 +483,8 @@ func srvrRunUDPPacketHandler(conn *net.UDPConn) {
 		server, port, _ := net.SplitHostPort(remoteIP.String())
 		test, found := tests[server]
 		if !found {
-			test, isNew := createOrGetTest(server, UDP, All)
+			var isNew bool
+			test, isNew = createOrGetTest(server, UDP, All)
 			if test != nil {
 				tests[server] = test
 			}
@@ -321,5 +501,106 @@ func srvrRunUDPPacketHandler(conn *net.UDPConn) {
 		} else {
 			ui.printDbg("Unable to create test for UDP traffic on port %s from %s port %s", gEthrPortStr, server, port)
 		}
+	}
+}
+
+func srvrRunKCPPacketHandler(listener *kcp.Listener, config KCPConfig) {
+	if err := listener.SetDSCP(config.DSCP); err != nil {
+		ui.printErr("kcp SetDSCP:%v", err)
+	}
+	if err := listener.SetReadBuffer(config.SockBuf); err != nil {
+		ui.printErr("kcp SetReadBuffer:%v", err)
+	}
+	if err := listener.SetWriteBuffer(config.SockBuf); err != nil {
+		ui.printErr("kcp SetWriteBuffer:%v", err)
+	}
+
+	for {
+		s, err := listener.AcceptKCP()
+		if err != nil {
+			ui.printDbg("AcceptKCP error: %v", err)
+		}
+		s.SetStreamMode(config.StreamMode)
+		s.SetWriteDelay(false)
+		s.SetNoDelay(config.NoDelay, config.Interval, config.Resend, config.NoCongestion)
+		s.SetMtu(config.MTU)
+		s.SetWindowSize(config.SndWnd, config.RcvWnd)
+		s.SetACKNoDelay(config.AckNodelay)
+		s.SetDeadline(time.Now().Add(time.Second * 600))
+
+		go srvrHandleNewConn(s, KCP)
+		//go printKCPStat()
+	}
+}
+
+// Setup a bare-bones TLS config for the server
+func generateTLSConfig() *tls.Config {
+	key, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		panic(err)
+	}
+	template := x509.Certificate{SerialNumber: big.NewInt(1)}
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
+	if err != nil {
+		panic(err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+
+	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		panic(err)
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{tlsCert},
+		NextProtos:   []string{"quic-echo-example"},
+	}
+}
+
+func srvrRunQUICServer() error {
+	//github.com/lucas-clemente/quic-go@v0.21.1/interface.go
+	config := &quic.Config{
+		HandshakeIdleTimeout:           time.Second * 30,
+		MaxIdleTimeout:                 time.Minute,
+		InitialStreamReceiveWindow:     1048576,
+		MaxStreamReceiveWindow:         10485760,
+		InitialConnectionReceiveWindow: 1048576,
+		MaxConnectionReceiveWindow:     104857600,
+		MaxIncomingStreams:             1000,
+		MaxIncomingUniStreams:          1000,
+		KeepAlive:                      true,
+		// Tracer: qlog.NewTracer(func(_ logging.Perspective, connID []byte) io.WriteCloser {
+		// filename := fmt.Sprintf("client_%x.qlog", connID)
+		// fmt.Println("filename=", filename)
+		// f, err := os.Create(filename)
+		// if err != nil {
+		// log.Fatal(err)
+		// }
+		// log.Printf("Creating qlog file %s.\n", filename)
+		// return NewBufferedWriteCloser(bufio.NewWriter(f), f)
+		// }),
+	}
+	l, err := quic.ListenAddr(gLocalIP+":"+gEthrPortStr, generateTLSConfig(), config)
+	if err != nil {
+		return err
+	}
+	defer l.Close()
+	for {
+		sess, err := l.Accept(context.Background())
+		if err != nil {
+			return err
+		}
+
+		stream, err := sess.AcceptStream(context.Background())
+		if err != nil {
+			ui.printErr("sess.AcceptStream error:%v", err)
+			return err
+		}
+		conn := QuicStreamConn{
+			stream: stream,
+			local:  sess.LocalAddr(),
+			remote: sess.RemoteAddr(),
+		}
+		go srvrHandleNewConn(conn, QUIC)
 	}
 }

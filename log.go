@@ -37,7 +37,14 @@ type logLatencyData struct {
 	Protocol   string
 	Avg        string
 	Min        string
+	P10        string
+	P20        string
+	P30        string
+	P40        string
 	P50        string
+	P60        string
+	P70        string
+	P80        string
 	P90        string
 	P95        string
 	P99        string
@@ -140,6 +147,35 @@ func logLatency(remoteIP, proto string, avg, min, p50, p90, p95, p99, p999, p999
 		logData.Avg = durationToString(avg)
 		logData.Min = durationToString(min)
 		logData.P50 = durationToString(p50)
+		logData.P90 = durationToString(p90)
+		logData.P95 = durationToString(p95)
+		logData.P99 = durationToString(p99)
+		logData.P999 = durationToString(p999)
+		logData.P9999 = durationToString(p9999)
+		logData.Max = durationToString(max)
+		logJSON, _ := json.Marshal(logData)
+		logChan <- string(logJSON)
+	}
+}
+
+func logLatencyEx(remoteIP, proto string, avg, min, p10, p20, p30, p40, p50, p60, p70, p80, p90, p95, p99, p999, p9999, max time.Duration) {
+	if loggingActive {
+		logData := logLatencyData{}
+		logData.Time = time.Now().UTC().Format(time.RFC3339)
+		logData.Title = ui.getTitle()
+		logData.Type = "LatencyResult"
+		logData.RemoteAddr = remoteIP
+		logData.Protocol = proto
+		logData.Avg = durationToString(avg)
+		logData.Min = durationToString(min)
+		logData.P10 = durationToString(p10)
+		logData.P20 = durationToString(p20)
+		logData.P30 = durationToString(p30)
+		logData.P40 = durationToString(p40)
+		logData.P50 = durationToString(p50)
+		logData.P60 = durationToString(p60)
+		logData.P70 = durationToString(p70)
+		logData.P80 = durationToString(p80)
 		logData.P90 = durationToString(p90)
 		logData.P95 = durationToString(p95)
 		logData.P99 = durationToString(p99)

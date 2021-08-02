@@ -60,6 +60,17 @@ func (u *clientUI) emitLatencyHdr() {
 	fmt.Printf("%9s %9s %9s %9s %9s %9s %9s %9s %9s\n", s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8])
 }
 
+func (u *clientUI) emitLatencyHdrEx() {
+	s := []string{"Avg\t", "Min\t", "10%\t", "20%\t", "30%\t", "40%\t", "50%\t", "60%\t", "70%\t", "80%\t", "90%\t", "95%\t", "99%\t", "99.9%\t", "99.99%\t", "Max\t"}
+	fmt.Println("-----------------------------------------------------------------------------------------")
+	all := ""
+	for _, v := range s {
+		// all += fmt.Sprintf("%9s ", v)
+		all += fmt.Sprintf("%s", v)
+	}
+	fmt.Println(all)
+}
+
 func (u *clientUI) emitLatencyResults(remote, proto string, avg, min, max, p50, p90, p95, p99, p999, p9999 time.Duration) {
 	logLatency(remote, proto, avg, min, max, p50, p90, p95, p99, p999, p9999)
 	fmt.Printf("%9s %9s %9s %9s %9s %9s %9s %9s %9s\n",
@@ -68,6 +79,20 @@ func (u *clientUI) emitLatencyResults(remote, proto string, avg, min, max, p50, 
 		durationToString(p95), durationToString(p99),
 		durationToString(p999), durationToString(p9999),
 		durationToString(max))
+}
+
+func (u *clientUI) emitLatencyResultsEx(remote, proto string, avg, min, max, p10, p20, p30, p40, p50, p60, p70, p80, p90, p95, p99, p999, p9999 time.Duration) {
+	logLatencyEx(remote, proto, avg, min, max, p10, p20, p30, p40, p50, p60, p70, p80, p90, p95, p99, p999, p9999)
+	// fmt.Printf("%9s %9s %9s %9s %9s %9s %9s %9s %9s %9s %9s %9s %9s %9s %9s %9s\n",
+	fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t\n",
+		durationToStringEx(avg), durationToStringEx(min),
+		durationToStringEx(p10), durationToStringEx(p20),
+		durationToStringEx(p30), durationToStringEx(p40),
+		durationToStringEx(p50), durationToStringEx(p60),
+		durationToStringEx(p70), durationToStringEx(p80),
+		durationToStringEx(p90), durationToStringEx(p95), durationToStringEx(p99),
+		durationToStringEx(p999), durationToStringEx(p9999),
+		durationToStringEx(max))
 }
 
 func (u *clientUI) emitTestResultEnd() {
@@ -90,7 +115,7 @@ var gNoConnectionStats bool
 func printBwTestDivider(p EthrProtocol) {
 	if p == TCP {
 		ui.printMsg("- - - - - - - - - - - - - - - - - - - - - - -")
-	} else if p == UDP {
+	} else if p == UDP || p == KCP || p == QUIC {
 		ui.printMsg("- - - - - - - - - - - - - - - - - - - - - - - - - - - -")
 	}
 }
@@ -98,7 +123,7 @@ func printBwTestDivider(p EthrProtocol) {
 func printBwTestHeader(p EthrProtocol) {
 	if p == TCP {
 		ui.printMsg("[  ID ]   Protocol    Interval      Bits/s")
-	} else if p == UDP {
+	} else if p == UDP || p == KCP || p == QUIC {
 		// Printing packets only makes sense for UDP as it is a datagram protocol.
 		// For TCP, TCP itself decides how to chunk the stream to send as packets.
 		ui.printMsg("[  ID ]   Protocol    Interval      Bits/s    Pkts/s")
@@ -106,7 +131,7 @@ func printBwTestHeader(p EthrProtocol) {
 }
 
 func printBwTestResult(p EthrProtocol, fd string, t0, t1, bw, pps uint64) {
-	if p == TCP {
+	if p == TCP || p == KCP || p == QUIC {
 		ui.printMsg("[%5s]     %-5s    %03d-%03d sec   %7s", fd,
 			protoToString(p), t0, t1, bytesToRate(bw))
 	} else if p == UDP {
@@ -117,7 +142,7 @@ func printBwTestResult(p EthrProtocol, fd string, t0, t1, bw, pps uint64) {
 
 func printTestResult(test *ethrTest, seconds uint64) {
 	if test.testID.Type == Bandwidth &&
-		(test.testID.Protocol == TCP || test.testID.Protocol == UDP) {
+		(test.testID.Protocol == TCP || test.testID.Protocol == UDP || test.testID.Protocol == KCP || test.testID.Protocol == QUIC) {
 		if gInterval == 0 {
 			printBwTestDivider(test.testID.Protocol)
 			printBwTestHeader(test.testID.Protocol)
