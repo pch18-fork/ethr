@@ -62,7 +62,7 @@ func numberToUnit(num uint64) string {
 		value = value / KILO
 	}
 
-	result := strconv.FormatFloat(value, 'f', 2, 64)
+	result := strconv.FormatFloat(value, 'f', 4, 64)
 	result = strings.TrimSuffix(result, ".00")
 	return result + unit
 }
@@ -109,7 +109,7 @@ func unitToNumber(s string) uint64 {
 
 func bytesToRate(bytes uint64) string {
 	bits := bytes * 8
-	result := numberToUnitEx(bits)
+	result := numberToUnit(bits)
 	return result
 }
 

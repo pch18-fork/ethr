@@ -426,14 +426,14 @@ func getTestResults(s *ethrSession, proto EthrProtocol, seconds uint64) []string
 	if found && test.isActive {
 		bwTestOn = true
 		bw = atomic.SwapUint64(&test.testResult.bw, 0)
-		bw /= seconds
+		// bw /= seconds
 		aggTestResult.bw += bw
 		aggTestResult.cbw++
 
 		if proto == TCP || proto == KCP || proto == QUIC {
 			cpsTestOn = true
 			cps = atomic.SwapUint64(&test.testResult.cps, 0)
-			cps /= seconds
+			// cps /= seconds
 			aggTestResult.cps += cps
 			aggTestResult.ccps++
 		}
@@ -441,7 +441,7 @@ func getTestResults(s *ethrSession, proto EthrProtocol, seconds uint64) []string
 		if proto == UDP {
 			ppsTestOn = true
 			pps = atomic.SwapUint64(&test.testResult.pps, 0)
-			pps /= seconds
+			// pps /= seconds
 			aggTestResult.pps += pps
 			aggTestResult.cpps++
 		}

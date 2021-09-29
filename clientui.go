@@ -49,7 +49,7 @@ func (u *clientUI) emitTestResultBegin() {
 }
 
 func (u *clientUI) emitTestHdr() {
-	s := []string{"ServerAddress", "Proto", "Bits/s", "Conn/s", "Pkt/s"}
+	s := []string{"ServerAddress", "Proto", "Bits", "Conn", "Pkt"}
 	fmt.Println("-----------------------------------------------------------")
 	fmt.Printf("%-15s %-5s %7s %7s %7s\n", s[0], s[1], s[2], s[3], s[4])
 }
@@ -122,11 +122,11 @@ func printBwTestDivider(p EthrProtocol) {
 
 func printBwTestHeader(p EthrProtocol) {
 	if p == TCP {
-		ui.printMsg("[  ID ]   Protocol    Interval      Bits/s")
+		ui.printMsg("[  ID ]   Protocol    Interval      Bits")
 	} else if p == UDP || p == KCP || p == QUIC {
 		// Printing packets only makes sense for UDP as it is a datagram protocol.
 		// For TCP, TCP itself decides how to chunk the stream to send as packets.
-		ui.printMsg("[  ID ]   Protocol    Interval      Bits/s    Pkts/s")
+		ui.printMsg("[  ID ]   Protocol    Interval      Bits    Pkts")
 	}
 }
 
@@ -153,7 +153,7 @@ func printTestResult(test *ethrTest, seconds uint64) {
 		test.connListDo(func(ec *ethrConn) {
 			bw := atomic.SwapUint64(&ec.bw, 0)
 			pps := atomic.SwapUint64(&ec.pps, 0)
-			bw /= seconds
+			// bw /= seconds
 			if !gNoConnectionStats {
 				fd := fmt.Sprintf("%5d", ec.fd)
 				printBwTestResult(test.testID.Protocol, fd, gInterval, gInterval+1, bw, pps)
@@ -184,7 +184,7 @@ func printTestResult(test *ethrTest, seconds uint64) {
 	} else if test.testID.Type == Pps {
 		if gInterval == 0 {
 			ui.printMsg("- - - - - - - - - - - - - - - - - - - - - - -")
-			ui.printMsg("Protocol    Interval      Bits/s    Pkts/s")
+			ui.printMsg("Protocol    Interval      Bits    Pkts")
 		}
 		bw := atomic.SwapUint64(&test.testResult.bw, 0)
 		pps := atomic.SwapUint64(&test.testResult.pps, 0)
