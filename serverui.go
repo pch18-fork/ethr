@@ -202,7 +202,7 @@ func (u *serverTui) emitTestResultEnd() {
 }
 
 func (u *serverTui) emitTestHdr() {
-	s := []string{"RemoteAddress", "Proto", "Bits/s", "Conn/s", "Pkts/s", "Latency"}
+	s := []string{"RemoteAddress", "Proto", "Bits", "Conn", "Pkts", "Latency"}
 	u.resultHdr = s
 }
 
@@ -362,7 +362,7 @@ func (u *serverCli) emitTestResultEnd() {
 }
 
 func (u *serverCli) emitTestHdr() {
-	s := []string{"RemoteAddress", "Proto", "Bits/s", "Conn/s", "Pkts/s", "Latency"}
+	s := []string{"RemoteAddress", "Proto", "Bits", "Conn", "Pkts", "Latency"}
 	fmt.Println("-----------------------------------------------------------")
 	fmt.Printf("[%13s]  %5s  %7s  %7s  %7s  %8s\n", s[0], s[1], s[2], s[3], s[4], s[5])
 }
